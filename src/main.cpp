@@ -3,11 +3,52 @@
 #include <json.hpp>
 #include <string>
 #include <unistd.h>
+#include <stdlib.h>
 #include <unordered_set>
+#include <unordered_map>
+#include <vector>
+#include <sys/mman.h>
+#include <thread>
 
-std::unordered_set<int>* chats;
+// std::unordered_set<int>* chats;
 
 using json = nlohmann::json;
+
+typedef struct Chat {
+  long long id;
+  std::string title;
+  std::vector<std::string> messages;
+} Chat;
+
+std::vector<std::string> ignoredUpdates = {
+    "updateUser"
+  , "updateChatPinnedMessage"
+  , "updateSupergroupFullInfo"
+  , "updateOption"
+  , "updateChatLastMessage"
+  , "updateSupergroup"
+  , "updateBasicGroup"
+  , "updateNewChat"
+  , "updateSelectedBackground"
+  , "updateScopeNotificationSettings"
+  , "updateChatReadInbox"
+  , "updateChatReadOutbox"
+  , "updateChatNotificationSettings"
+  , "updateNewMessage"
+  , "updateUnreadMessageCount"
+  , "updateBasicGroupFullInfo"
+  , "updateDeleteMessages"
+  , "updateMessageContent"
+  , "updateMessageEdited"
+  , "updateFile"
+  , "remoteFile"
+  , "updateUnreadChatCount"
+  , "updateHavePendingNotifications"
+  , "updateUserStatus"
+  , "updateMessageViews"
+};
+
+std::unordered_map<long long, Chat> *chats;
 
 void handleAuthentication (void *client, json authenticationState) {
   if (authenticationState["@type"] == "authorizationStateWaitTdlibParameters") {
@@ -136,9 +177,70 @@ int main() {
 
   void *client = td_json_client_create();
 
-  chats = new std::unordered_set<int>();
+  // chats = (std::unordered_map<long long int, Chat>*) mmap(NULL, sizeof (std::unordered_map<long long, Chat>), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+  chats = new std::unordered_map<long long int, Chat>();
 
   const double WAIT_TIMEOUT = 100.0;  // seconds
+
+  std::thread t([&](){
+    long long c_id = 0;
+    while (true) {
+      std::string choice;
+      std::cout << "Option [l - list, u - update chat info, m - get chat messages, p - print chat messages]: ";
+      std::cin >> choice;
+
+      if (choice == "l") {
+        for (auto i : *chats)
+          if (i.second.title == "") continue;
+          else std::cout << "[" << i.second.id << "] - " << i.second.title << "\n";
+      }
+
+      if (choice == "m") {
+        std::string id;
+        std::cout << "Chat id: ";
+        std::cin >> id;
+
+        char *b;
+
+        c_id = strtoll(id.c_str(), &b, 10);
+      }
+
+      if (c_id != 0) {
+        json _params = {
+          {"@type", "getChatHistory"},
+          {"chat_id", c_id},
+          {"from_message_id", 0},
+          {"offset", -10},
+          {"limit", 20},
+          {"only_local", false}
+        };
+
+        td_json_client_send(client, _params.dump().c_str());
+      }
+
+      if (choice == "p") {
+        for (auto i : (*chats)[c_id].messages){
+          std::cout << i << '\n';
+        }
+      }
+
+      if (choice == "u") {
+        // Ask for the information about all the chats
+        for (auto i : *chats) {
+
+            json params = {
+              {"@type", "getChat"},
+              {"chat_id", i.second.id}
+            };
+
+            td_json_client_send(client, params.dump().c_str());
+        }
+      }
+    }
+  });
+
+  t.detach();
 
   while (true) {
     json result = json::parse(td_json_client_receive(client, WAIT_TIMEOUT));
@@ -146,33 +248,8 @@ int main() {
       if (result["@type"] == "updateAuthorizationState")
         handleAuthentication(client, result["authorization_state"]);
 
-      // Ignore this events
-      if (result["@type"] == "updateUser") continue;
-      if (result["@type"] == "updateChatPinnedMessage") continue;
-      if (result["@type"] == "updateSupergroupFullInfo") continue;
-      if (result["@type"] == "updateOption") continue;
-      if (result["@type"] == "updateChatLastMessage") continue;
-      if (result["@type"] == "updateSupergroup") continue;
-      if (result["@type"] == "updateBasicGroup") continue;
-      if (result["@type"] == "updateNewChat") continue;
-      if (result["@type"] == "updateSelectedBackground") continue;
-      if (result["@type"] == "updateScopeNotificationSettings") continue;
-      if (result["@type"] == "updateChatReadInbox") continue;
-      if (result["@type"] == "updateChatReadOutbox") continue;
-      if (result["@type"] == "updateChatNotificationSettings") continue;
-      if (result["@type"] == "updateNewMessage") continue;
-      if (result["@type"] == "updateUnreadMessageCount") continue;
-      if (result["@type"] == "updateBasicGroupFullInfo") continue;
-      if (result["@type"] == "updateDeleteMessages") continue;
-      if (result["@type"] == "updateMessageContent") continue;
-      if (result["@type"] == "updateMessageEdited") continue;
-      if (result["@type"] == "updateFile") continue;
-      if (result["@type"] == "remoteFile") continue;
-      if (result["@type"] == "updateUnreadChatCount") continue;
-      if (result["@type"] == "updateHavePendingNotifications") continue;
-      if (result["@type"] == "updateUserStatus") continue;
-      if (result["@type"] == "updateMessageViews") continue;
-      // if (result["@type"] == "error") continue;
+      // Ignore certain events
+      if (std::find(ignoredUpdates.begin(), ignoredUpdates.end(), result["@type"]) != ignoredUpdates.end()) continue;
 
       // Get the list of chats
       if (result["@type"] == "updateChatOrder") {
@@ -192,7 +269,9 @@ int main() {
       if (result["@type"] == "chats") {
         for (int i = 0; i < sizeof(result["chat_ids"]); ++i) {
           if (result["chat_ids"][i] == nullptr) continue;
-          chats->emplace(result["chat_ids"][i]);
+          Chat buf;
+          buf.id = result["chat_ids"][i];
+          chats->insert(std::make_pair(result["chat_ids"][i], buf));
         }
 
         continue;
@@ -200,30 +279,24 @@ int main() {
 
       // Every time a chat is received, print it's id and title
       if (result["@type"] == "chat") {
-        
-        if (result["title"] == "") continue;
-
-        std::cout << "[" << result["id"] << "]: " << result["title"] << "\n";
-
-        // std::cout << "--------------------------------\n";
-        // std::cout << result.dump();
-        // std::cout << "--------------------------------\n";
+        (*chats)[result["id"]].title = result["title"];
 
         continue;
       }
 
+      // Every time a chat is received, print it's id and title
+      if (result["@type"] == "messages") {
+        for (int i = 0; i < result["total_count"]; i++) {
+          auto a = (*chats)[result["messages"][i]["chat_id"]].messages;
+          if (result["messages"][i]["content"]["@type"] != "messageText") continue;
+          if (std::find(a.begin(), a.end(), result["messages"][i]["content"]["text"]["text"]) != a.end()) continue;
+          (*chats)[result["messages"][i]["chat_id"]].messages.push_back(result["messages"][i]["content"]["text"]["text"]);
+        }
 
-      // Ask for the information about all the chats
-      for (auto i : *chats) {
-
-          json params = {
-            {"@type", "getChat"},
-            {"chat_id", i}
-          };
-          td_json_client_send(client, params.dump().c_str());
+        continue;
       }
 
-      std::cout << result.dump() << std::endl;
+      // std::cout << result.dump() << std::endl;
     }
   }
 
